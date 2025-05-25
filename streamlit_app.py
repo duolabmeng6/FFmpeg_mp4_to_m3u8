@@ -89,7 +89,7 @@ def main():
             """)
 
         if video_encoder != "copy":
-            resolution = st.selectbox(
+            resolutions = st.multiselect(
                 "分辨率",
                 options=[
                     "原始分辨率",
@@ -100,9 +100,9 @@ def main():
                     "854x480",
                     "640x360"
                 ],
-                index=0,
-                help="输出视频分辨率",
-                key="resolution",
+                default=["1920x1080"],
+                help="选择一个或多个输出视频分辨率",
+                key="resolutions",
                 format_func=lambda x: {
                     "原始分辨率": "保持原始分辨率",
                     "3840x2160": "4K",
@@ -113,6 +113,10 @@ def main():
                     "640x360": "360p"
                 }[x]
             )
+
+            if not resolutions:
+                st.warning("请至少选择一个输出分辨率")
+                return
 
             # 根据分辨率设置码率选项
             bitrate_settings = {
@@ -146,14 +150,17 @@ def main():
                 }
             }
 
-            video_bitrate = st.selectbox(
-                "视频码率",
-                options=bitrate_settings[resolution]["options"],
-                index=1,
-                help=bitrate_settings[resolution]["help"],
-                key="video_bitrate"
-            )
-            st.info(f"当前视频设置：{resolution} @ {video_bitrate}/s")
+            # 为每个选择的分辨率创建一个码率选择器
+            video_bitrates = {}
+            for resolution in resolutions:
+                video_bitrates[resolution] = st.selectbox(
+                    f"视频码率 ({resolution})",
+                    options=bitrate_settings[resolution]["options"],
+                    index=1,
+                    help=bitrate_settings[resolution]["help"],
+                    key=f"video_bitrate_{resolution}"
+                )
+                st.info(f"当前视频设置：{resolution} @ {video_bitrates[resolution]}/s")
 
     # 音频设置
     with col2:
@@ -294,62 +301,71 @@ def main():
     # 命令生成
     st.header("🔧 生成的FFmpeg命令")
     
-    # 构建FFmpeg命令
-    command_parts = ["ffmpeg", "-y", "-i", f'\"{input_file}\"']
-    
-    # 视频编码参数
-    command_parts.extend(["-c:v", video_encoder])
-    if video_encoder != "copy":
-        if resolution != "原始分辨率":
-            command_parts.extend(["-s", resolution])
-        command_parts.extend(["-b:v", video_bitrate])
+    if video_encoder != "copy" and not resolutions:
+        st.error("请至少选择一个输出分辨率")
+        return
+
+    # 为每个分辨率生成一个命令
+    for resolution in (resolutions if video_encoder != "copy" else ["原始分辨率"]):
+        # 构建FFmpeg命令
+        command_parts = ["ffmpeg", "-y", "-i", f'\"{input_file}\"']
         
-        # 根据不同编码器添加特定参数
-        if video_encoder == "libx264":
-            command_parts.extend(["-preset", "fast"])
-        elif "nvenc" in video_encoder:
-            command_parts.extend([
-                "-preset", "p4",
-                "-rc", "cbr"
-            ])
-        elif "qsv" in video_encoder:
-            command_parts.extend(["-preset", "medium"])
-        elif "videotoolbox" in video_encoder:
-            command_parts.extend(["-allow_sw", "1"])
-    
-    # 音频编码参数
-    command_parts.extend(["-c:a", audio_encoder])
-    if audio_encoder != "copy" and 'audio_bitrate' in locals():
-        command_parts.extend(["-b:a", audio_bitrate])
-    
-    # HLS参数
-    command_parts.extend([
-        "-f", "hls",
-        "-hls_time", str(segment_time),
-        "-hls_playlist_type", playlist_type,
-        "-hls_segment_filename", f'"{output_dir}/segment_%03d.ts"'
-    ])
-    
-    # 加密参数
-    if encryption_enabled:
-        key_file = os.path.join(output_dir, "enc.key")
-        key_info_file = os.path.join(output_dir, "enc.keyinfo")
+        # 视频编码参数
+        command_parts.extend(["-c:v", video_encoder])
+        if video_encoder != "copy":
+            if resolution != "原始分辨率":
+                command_parts.extend(["-s", resolution])
+            command_parts.extend(["-b:v", video_bitrates[resolution]])
+            
+            # 根据不同编码器添加特定参数
+            if video_encoder == "libx264":
+                command_parts.extend(["-preset", "fast"])
+            elif "nvenc" in video_encoder:
+                command_parts.extend([
+                    "-preset", "p4",
+                    "-rc", "cbr"
+                ])
+            elif "qsv" in video_encoder:
+                command_parts.extend(["-preset", "medium"])
+            elif "videotoolbox" in video_encoder:
+                command_parts.extend(["-allow_sw", "1"])
+        
+        # 音频编码参数
+        command_parts.extend(["-c:a", audio_encoder])
+        if audio_encoder != "copy" and 'audio_bitrate' in locals():
+            command_parts.extend(["-b:a", audio_bitrate])
+        
+        # 创建分辨率特定的输出目录
+        resolution_dir = f"{output_dir}/{resolution.replace('x', 'p')}"
+        
+        # HLS参数
         command_parts.extend([
-            "-hls_key_info_file", f'"{key_info_file}"',
-            "-hls_enc", "1"
+            "-f", "hls",
+            "-hls_time", str(segment_time),
+            "-hls_playlist_type", playlist_type,
+            "-hls_segment_filename", f'"{resolution_dir}/segment_%03d.ts"'
         ])
-        if key_rotation_period > 0:
-            command_parts.extend(["-hls_key_rotation_period", str(key_rotation_period)])
-    
-    # 输出文件
-    output_path = f"{output_dir}/{output_name}.m3u8"
-    command_parts.append(f'"{output_path}"')
-    
-    # 显示命令
-    ffmpeg_command = " ".join(command_parts)
-    st.code(ffmpeg_command, language="bash")
-    
-    
+        
+        # 加密参数
+        if encryption_enabled:
+            key_file = os.path.join(resolution_dir, "enc.key")
+            key_info_file = os.path.join(resolution_dir, "enc.keyinfo")
+            command_parts.extend([
+                "-hls_key_info_file", f'"{key_info_file}"',
+                "-hls_enc", "1"
+            ])
+            if key_rotation_period > 0:
+                command_parts.extend(["-hls_key_rotation_period", str(key_rotation_period)])
+        
+        # 输出文件
+        output_path = f"{resolution_dir}/{output_name}.m3u8"
+        command_parts.append(f'"{output_path}"')
+        
+        # 显示命令
+        st.subheader(f"📺 {resolution} 转换命令")
+        ffmpeg_command = " ".join(command_parts)
+        st.code(ffmpeg_command, language="bash")
+
     # 使用说明
     st.info("""
     **使用说明：**
@@ -357,6 +373,7 @@ def main():
     2. 在终端/命令行中运行该命令
     3. 确保输入文件存在且FFmpeg已正确安装
     4. 输出目录会自动创建（如果不存在）
+    5. 每个分辨率的输出文件将保存在各自的子目录中
     """)
     
     # 转换信息
@@ -365,8 +382,8 @@ def main():
     with col1:
         st.metric("分片时长", f"{segment_time}秒")
         if video_encoder != "copy":
-            st.metric("视频码率", video_bitrate)
-            st.metric("分辨率", resolution)
+            for resolution in resolutions:
+                st.metric(f"视频码率 ({resolution})", video_bitrates[resolution])
         st.metric("视频编码器", video_encoder)
     with col2:
         st.metric("播放列表类型", playlist_type)
